@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -13,16 +12,20 @@ import (
 var pl = fmt.Println
 var pf = fmt.Printf
 
+var esc_char byte = '\\'
+
 type pixel_pair struct {
 	px1		color.NRGBA
 	px2		color.NRGBA
 }
 
 func main() {
+	var usage string = "Usage: inktangle [w | r] [path] [message]"
 
 	argc := len(os.Args)
 	if argc < 3 {
-		panic("Too few arguments...")
+		pl(usage)
+		return
 	}
 
 	switch arg1 := os.Args[1]; arg1 {
@@ -35,60 +38,67 @@ func main() {
 		encode_message(msg, os.Args[2])
 	case "r":
 		msg := string(decode_message(os.Args[2]))
-		pl(get_readable(msg))
+		pl(msg)
 	default:
-		pl("Wrong input...")
+		pl(usage)
 	}
-
-}
-
-func get_readable(msg string) (readable string) {
-	for i := 0; i < len(msg); i++ {
-		if msg[i] == '\\' {
-			return readable
-		}
-		readable += string(msg[i])
-	}
-	return "Error..."
+	return
 }
 
 func encode_message(msg string, file string) {
-	src_img, err := read_image(file)
-	if err != nil {
-		log.Fatal(err)
+
+	// read src file 
+	img := read_image(file)
+
+	width := img.Bounds().Max.X
+	height := img.Bounds().Max.Y
+	pixel_count := width * height
+
+	msg += string(esc_char)
+
+	if len(msg) >= pixel_count / 2 {
+		log.Fatal("Message does not fit in this image...")
 	}
 
-	width := src_img.Bounds().Max.X
-	height := src_img.Bounds().Max.Y
+	interval := pixel_count / len(msg)
+	interval %= 255
+	
+	x1, y1 := to_pos(0, width)
+	x2, y2 := to_pos(1, width)
 
-    dst_img := image.NewNRGBA(image.Rect(0, 0, width, height))
+	var pair pixel_pair
+	pair.px1 = img.NRGBAAt(x1, y1)
+	pair.px2 = img.NRGBAAt(x2, y2)
 
-	msg += "\\"
+	new_pair := encode_char(pair, byte(interval))
+	img.SetNRGBA(x1, y1, new_pair.px1)
+	img.SetNRGBA(x2, y2, new_pair.px2)
 
-	for i := 0; i < width * height -1; i++ {
+	msg_index := 0
+	
+	// write and encode msg
+	for i := interval; i < pixel_count -1; i += interval {
+	
+		x1, y1 := to_pos(i, width)
+		x2, y2 := to_pos(i+1, width)
 		
-
-		x1, y1 := to_pos(i*2, width)
-		x2, y2 := to_pos(i*2+1, width)
+		if msg_index >= len(msg) {
+			break
+		}
 	
 		var pair pixel_pair
-		pair.px1 = src_img.NRGBAAt(x1, y1)
-		pair.px2 = src_img.NRGBAAt(x2, y2)
-
-		if i >= len(msg) {
-			dst_img.SetNRGBA(x1, y1, pair.px1)
-			dst_img.SetNRGBA(x2, y2, pair.px2)
-			//TODO pixel lowest right does not get drawn if the pixels count is uneven
-			continue
-		}
+		pair.px1 = img.NRGBAAt(x1, y1)
+		pair.px2 = img.NRGBAAt(x2, y2)
 
 
-		new_pair := encode_char(pair, msg[i])
-		dst_img.SetNRGBA(x1, y1, new_pair.px1)
-		dst_img.SetNRGBA(x2, y2, new_pair.px2)
+		new_pair := encode_char(pair, msg[msg_index])
+		img.SetNRGBA(x1, y1, new_pair.px1)
+		img.SetNRGBA(x2, y2, new_pair.px2)
+		msg_index++
 	}
 
-	write_img(*dst_img, "INKT_" + file)
+	// save output
+	write_img(img, "INK_" + file)
 }
 
 func encode_char(pair pixel_pair, char byte) (new_pair pixel_pair) {
@@ -98,25 +108,25 @@ func encode_char(pair pixel_pair, char byte) (new_pair pixel_pair) {
 	b := pair.px1.B
 	a := pair.px1.A
 
+	r2 := pair.px1.R
+	g2 := pair.px1.G
+	b2 := pair.px1.B
+	a2 := pair.px1.A
+	
+	// the order the bits are written in matter
 	r, char = write_bit(r, char)
 	g, char = write_bit(g, char)
 	b, char = write_bit(b, char)
 	a, char = write_bit(a, char)
 	
-	new_pair.px1 = color.NRGBA{r, g, b, a}
-	
-	r2 := pair.px1.R
-	g2 := pair.px1.G
-	b2 := pair.px1.B
-	a2 := pair.px1.A
-
 	r2, char = write_bit(r2, char)
 	g2, char = write_bit(g2, char)
 	b2, char = write_bit(b2, char)
 	a2, char = write_bit(a2, char)
 	
+	new_pair.px1 = color.NRGBA{r, g, b, a}
 	new_pair.px2 = color.NRGBA{r2, g2, b2, a2}
-	
+
 	return new_pair
 }
 
@@ -131,16 +141,25 @@ func write_bit(channel uint8, char byte) (uint8, byte) {
 }
 
 func decode_message(file string) []byte {
-	img, err := read_image(file)
-	if err != nil {
-		log.Fatal(err)
-	}
+	// read src file
+	img := read_image(file)
 
 	width := img.Bounds().Max.X
 	height := img.Bounds().Max.Y
 
+	
+	x1, y1 := to_pos(0, width)
+	x2, y2 := to_pos(1, width)
+
+	var pair pixel_pair
+	pair.px1 = img.NRGBAAt(x1, y1)
+	pair.px2 = img.NRGBAAt(x2, y2)
+
+	var interval int = int(decode_char(pair))
+
+	// loop through image pixels
 	var msg []byte
-	for i := 0; i < width * height -1; i += 2 {
+	for i := interval; i < width * height -1; i += interval {
 		x1, y1 := to_pos(i, width)
 		x2, y2 := to_pos(i+1, width)
 
@@ -148,8 +167,11 @@ func decode_message(file string) []byte {
 		pair.px1 = img.NRGBAAt(x1, y1)
 		pair.px2 = img.NRGBAAt(x2, y2)
 
-
-		msg = append(msg, decode_char(pair))
+		var char byte = decode_char(pair)
+		if char == esc_char {
+			return msg
+		}
+		msg = append(msg, char)
 	}
 
 	return msg
@@ -177,9 +199,9 @@ func decode_char(pair pixel_pair) (char byte) {
 	char = read_bit(b, char)
 	char = read_bit(g, char)
 	char = read_bit(r, char)
+
 	return char
 }
-
 
 func read_bit(channel uint8, char byte) byte {
 	char = char << 1				// shift char to write next bit to output
@@ -194,7 +216,7 @@ func to_pos(i int, width int) (x int, y int) {
 	return x, y
 }
 
-func read_image(path string) (image.NRGBA, error) {
+func read_image(path string) image.NRGBA {
 	file, err := os.Open(path)
 	if err != nil {
 		log.Fatal(err)
@@ -205,10 +227,11 @@ func read_image(path string) (image.NRGBA, error) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if img_nrgba, ok := img_data.(*image.NRGBA); ok {
-		return *img_nrgba, nil
+	img_nrgba, ok := img_data.(*image.NRGBA)
+	if !ok {
+		log.Fatal("File could not be converted...")
 	}
-	return *image.NewNRGBA(image.Rect(0,0,0,0)), errors.New("File could not be converted...")
+	return *img_nrgba
 }
 
 func write_img(data image.NRGBA, path string) {
